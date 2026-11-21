@@ -78,10 +78,40 @@ Edit `.env`, then run `docker compose up -d`.
 |---|---|---|
 | `RR_AUTOSTART` | `all`: start every instance when the container starts<br>`last`: start the instances that were running before the restart<br>`none`: start nothing<br>`123456,234567`: start these instance IDs | `all` |
 | `RR_AUTOSTART_DELAY` | Seconds to wait before the automatic start. Keep it at 45 or more. | `45` |
+| `RR_METRICS_PORT` | Port for Prometheus metrics, see [Metrics](#metrics). | off |
+| `RR_METRICS_INTERVAL` | Seconds between two polls of the web admin for the metrics. | `15` |
 | `RR_MAC_ADDRESS` | MAC address of the container, created in setup step 2. Never change it after registering. | none |
 
 The log shows the result about a minute after the start:
 `autostart: instance 123456 (My server): running=True, port 60000, time port 60002`.
+
+## Metrics
+
+With `RR_METRICS_PORT=9127` in `.env` the container serves Prometheus metrics on
+`http://<container>:9127/metrics`. Do not publish the port to the internet; let Prometheus reach the
+container over a Docker network instead:
+
+```yaml
+scrape_configs:
+  - job_name: raceroom
+    static_configs:
+      - targets: ['raceroom-server:9127']
+```
+
+The exporter polls the web admin's API every 15 seconds and reads the result files the server writes
+after each session. Scrapes only return the last poll and never reach the server.
+
+| Metric | Content |
+|---|---|
+| `raceroom_up` | 1 if the web admin answered |
+| `raceroom_instance_info` | Name, track, layout, port and number of cars per instance (value 1) |
+| `raceroom_instance_running` | 1 if the instance is running |
+| `raceroom_players`, `raceroom_max_players` | Connected players and the limit |
+| `raceroom_current_session_info` | Running session (label `session`: Practice, Qualify, Race1, ...), taken from the newest result file |
+| `raceroom_session_time_left_seconds` | Remaining time of the running session (only meaningful with players on the server) |
+| `raceroom_best_lap_seconds` | Best valid lap per driver, track, layout and car from the result files |
+| `raceroom_driver_laps`, `raceroom_driver_valid_laps` | Laps per driver from the result files |
+| `raceroom_sessions_with_drivers` | Sessions with at least one driver, by session type |
 
 ## Reverse proxy
 

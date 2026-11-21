@@ -8,6 +8,7 @@
 #   RR_AUTOSTART         all (default) | last (what was running before) | none | comma-separated instance IDs
 #   RR_AUTOSTART_DELAY   seconds to wait before starting them (default 45, see autostart.py)
 #   RR_WINDOWS_VERSION   Windows version Wine reports to the server front end (default win10)
+#   RR_METRICS_PORT      serve Prometheus metrics on this port (default: off, see metrics.py)
 set -e
 export WINEARCH=win64
 export WINEPREFIX="${WINEPREFIX:-/data/prefix}"
@@ -44,6 +45,7 @@ case "${1:-run}" in
     # instead of leaving it hanging in the debugger.
     export WINEDLLOVERRIDES="winedbg.exe=d"
     python3 /usr/local/bin/autostart.py &
+    if [ -n "$RR_METRICS_PORT" ]; then python3 /usr/local/bin/metrics.py & fi
     cd "$SERVER_DIR"
     exec wine RRRE_Dedicated.exe ;;
   update)

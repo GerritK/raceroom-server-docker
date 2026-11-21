@@ -58,7 +58,7 @@ COPY --from=winebuild /out/http.sys /out/httpapi.dll /opt/wine-${WINE_BRANCH}/li
 RUN printf '#!/bin/sh\nexit 0\n' > /usr/local/bin/xdg-open && chmod +x /usr/local/bin/xdg-open
 
 ENV PATH="$PATH:/usr/games"
-COPY autostart.py /usr/local/bin/autostart.py
+COPY autostart.py metrics.py /usr/local/bin/
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
