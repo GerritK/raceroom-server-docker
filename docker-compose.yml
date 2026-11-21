@@ -1,0 +1,39 @@
+services:
+  raceroom:
+    build: .
+    image: raceroom-dedicated-wine
+    container_name: raceroom-server
+    hostname: raceroom-server
+    init: true
+    tty: true              # required: without a terminal the server crashes in Console.ReadKey
+    restart: unless-stopped
+    volumes:
+      - ./data:/data       # server files, Wine prefix and the server's own settings
+    ports:
+      - '127.0.0.1:8088:8088'   # web admin, local only (see README)
+      - '60000:60000/udp'       # game port of the first server instance
+      - '60001:60001/tcp'
+      - '60002:60002/udp'       # time port
+    networks:
+      default:
+        # Has to stay the same forever: the server encrypts its settings (including the registration)
+        # with a key derived from the MAC address. Generated once into .env, see README, Setup.
+        mac_address: "${RR_MAC_ADDRESS:?RR_MAC_ADDRESS is not set. Create .env as described in the README (Setup, step 2)}"
+    env_file:
+      - .env               # settings such as RR_AUTOSTART, see .env.example
+    healthcheck:
+      test: ["CMD", "curl", "-s", "-f", "-o", "/dev/null", "http://127.0.0.1:8088/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+
+    # Example: web admin behind Traefik. Remove the 8088 port mapping above when using this, and attach
+    # the service to your proxy network. The Host header has to carry the port, see README.
+    # labels:
+    #   - traefik.enable=true
+    #   - traefik.http.routers.raceroom.rule=Host(`raceroom.example.com`)
+    #   - traefik.http.routers.raceroom.tls=true
+    #   - traefik.http.routers.raceroom.middlewares=raceroom-host
+    #   - traefik.http.middlewares.raceroom-host.headers.customrequestheaders.Host=raceroom.example.com:8088
+    #   - traefik.http.services.raceroom.loadbalancer.server.port=8088

@@ -1,0 +1,192 @@
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+Fixes for Wine's HTTP Server API implementation (dlls/http.sys, dlls/httpapi).
+This patch modifies Wine source code and is licensed like Wine itself, under the
+GNU Lesser General Public License, version 2.1 or later
+(https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html).
+
+diff -urN a/dlls/httpapi/httpapi_main.c b/dlls/httpapi/httpapi_main.c
+--- a/dlls/httpapi/httpapi_main.c
++++ b/dlls/httpapi/httpapi_main.c
+@@ -289,7 +289,8 @@
+ 
+     if (!ovl)
+     {
+-        sync_ovl.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
++        /* the low bit keeps the result away from a completion port bound to the queue */
++        sync_ovl.hEvent = (HANDLE)((ULONG_PTR)CreateEventW(NULL, TRUE, FALSE, NULL) | 1);
+         ovl = &sync_ovl;
+     }
+ 
+@@ -341,7 +342,8 @@
+ 
+     if (!ovl)
+     {
+-        sync_ovl.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
++        /* the low bit keeps the result away from a completion port bound to the queue */
++        sync_ovl.hEvent = (HANDLE)((ULONG_PTR)CreateEventW(NULL, TRUE, FALSE, NULL) | 1);
+         ovl = &sync_ovl;
+     }
+ 
+@@ -365,6 +367,19 @@
+     return ret;
+ }
+ 
++/***********************************************************************
++ *        HttpCancelHttpRequest     (HTTPAPI.@)
++ *
++ * Not implemented. As a stub entry it would abort the calling process; the .NET HttpListener
++ * calls it whenever a client goes away in the middle of a request and ignores the result.
++ */
++ULONG WINAPI HttpCancelHttpRequest(HANDLE queue, HTTP_REQUEST_ID id, OVERLAPPED *ovl);
++ULONG WINAPI HttpCancelHttpRequest(HANDLE queue, HTTP_REQUEST_ID id, OVERLAPPED *ovl)
++{
++    FIXME("queue %p, id %s, ovl %p, stub!\n", queue, wine_dbgstr_longlong(id), ovl);
++    return ERROR_CONNECTION_INVALID;
++}
++
+ static void format_date(char *buffer)
+ {
+     static const char day_names[7][4] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+@@ -506,12 +521,28 @@
+     }
+ 
+     if (!ovl)
++    {
++        /* the low bit keeps the result away from a completion port bound to the queue */
++        dummy_ovl.hEvent = (HANDLE)((ULONG_PTR)CreateEventW(NULL, TRUE, FALSE, NULL) | 1);
+         ovl = &dummy_ovl;
++    }
+ 
+     if (!DeviceIoControl(queue, IOCTL_HTTP_SEND_RESPONSE, buffer,
+             offsetof(struct http_response, buffer[len]), NULL, 0, NULL, ovl))
+         ret = GetLastError();
+ 
++    if (ovl == &dummy_ovl)
++    {
++        if (ret == ERROR_IO_PENDING)
++        {
++            DWORD sent;
++            ret = ERROR_SUCCESS;
++            if (!GetOverlappedResult(queue, ovl, &sent, TRUE))
++                ret = GetLastError();
++        }
++        CloseHandle(dummy_ovl.hEvent);
++    }
++
+     free(buffer);
+     return ret;
+ }
+@@ -588,6 +619,8 @@
+ 
+     if (!ovl)
+     {
++        /* the low bit keeps the result away from a completion port bound to the queue */
++        dummy_ovl.hEvent = (HANDLE)((ULONG_PTR)CreateEventW(NULL, TRUE, FALSE, NULL) | 1);
+         ovl = &dummy_ovl;
+         if (ret_size)
+             *ret_size = len;
+@@ -597,6 +630,18 @@
+             offsetof(struct http_response, buffer[len]), NULL, 0, NULL, ovl))
+         ret = GetLastError();
+ 
++    if (ovl == &dummy_ovl)
++    {
++        if (ret == ERROR_IO_PENDING)
++        {
++            DWORD sent;
++            ret = ERROR_SUCCESS;
++            if (!GetOverlappedResult(queue, ovl, &sent, TRUE))
++                ret = GetLastError();
++        }
++        CloseHandle(dummy_ovl.hEvent);
++    }
++
+     free(buffer);
+     return ret;
+ }
+diff -urN a/dlls/httpapi/httpapi.spec b/dlls/httpapi/httpapi.spec
+--- a/dlls/httpapi/httpapi.spec
++++ b/dlls/httpapi/httpapi.spec
+@@ -1,7 +1,7 @@
+ @ stub HttpAddFragmentToCache
+ @ stdcall HttpAddUrl(ptr wstr ptr)
+ @ stdcall HttpAddUrlToUrlGroup(int64 wstr int64 long)
+-@ stub HttpCancelHttpRequest
++@ stdcall HttpCancelHttpRequest(ptr int64 ptr)
+ @ stdcall HttpCloseRequestQueue(ptr)
+ @ stdcall HttpCloseServerSession(int64)
+ @ stdcall HttpCloseUrlGroup(int64)
+diff -urN a/dlls/http.sys/http.c b/dlls/http.sys/http.c
+--- a/dlls/http.sys/http.c
++++ b/dlls/http.sys/http.c
+@@ -960,7 +960,22 @@
+ 
+     EnterCriticalSection(&http_cs);
+ 
+-    if ((conn = get_connection(params->id)) && conn->available && conn->queue == queue)
++    if (params->id == HTTP_NULL_ID)
++    {
++        /* Any connection with a complete request that nobody has picked up yet will do. Looking
++         * only at the first connection without a request ID misses them as soon as an idle
++         * keep-alive connection comes first in the list, and those requests then wait forever. */
++        LIST_FOR_EACH_ENTRY(conn, &connections, struct connection, entry)
++        {
++            if (conn->req_id == HTTP_NULL_ID && conn->available && conn->queue == queue)
++            {
++                ret = complete_irp(conn, irp);
++                LeaveCriticalSection(&http_cs);
++                return ret;
++            }
++        }
++    }
++    else if ((conn = get_connection(params->id)) && conn->available && conn->queue == queue)
+     {
+         ret = complete_irp(conn, irp);
+         LeaveCriticalSection(&http_cs);
+@@ -992,6 +1007,36 @@
+     return ret;
+ }
+ 
++/* The connection sockets are non-blocking. Send everything, waiting for the peer if necessary,
++ * instead of dropping the connection (or silently the rest of the data) when the send buffer is full. */
++static int send_all(SOCKET socket, const char *buffer, int len)
++{
++    while (len > 0)
++    {
++        int ret = send(socket, buffer, len, 0);
++
++        if (ret < 0)
++        {
++            struct timeval timeout = {30, 0};
++            fd_set writefds;
++
++            if (WSAGetLastError() != WSAEWOULDBLOCK)
++                return -1;
++            FD_ZERO(&writefds);
++            FD_SET(socket, &writefds);
++            if (select(0, NULL, &writefds, NULL, &timeout) <= 0)
++            {
++                WSASetLastError(WSAETIMEDOUT);
++                return -1;
++            }
++            continue;
++        }
++        buffer += ret;
++        len -= ret;
++    }
++    return 0;
++}
++
+ static NTSTATUS http_send_response(struct request_queue *queue, IRP *irp)
+ {
+     const struct http_response *response = irp->AssociatedIrp.SystemBuffer;
+@@ -1003,7 +1048,7 @@
+ 
+     if ((conn = get_connection(response->id)))
+     {
+-        if (send(conn->socket, response->buffer, response->len, 0) >= 0)
++        if (send_all(conn->socket, response->buffer, response->len) >= 0)
+         {
+             /* Clean up the connection if we are not sending more response data. */
+             if (response->response_flags != HTTP_SEND_RESPONSE_FLAG_MORE_DATA)
